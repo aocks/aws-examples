@@ -1,0 +1,534 @@
+
+* Introduction
+
+Imagine you want your firm to be able to deliver files to a
+customer by writing data to their AWS S3 bucket. You can do this with
+"cross account bucket permissions" as described below. You can also
+refer to [[https://docs.aws.amazon.com/AmazonS3/latest/dev/example-walkthroughs-managing-access-example2.html][various]] [[https://docs.aws.amazon.com/AmazonS3/latest/dev/example-walkthroughs-managing-access-example4.html][bits]] of [[https://aws.amazon.com/premiumsupport/knowledge-center/cross-account-access-s3/][AWS documentation]] if you prefer, but there
+are some tricky steps that may not be clear in those articles.
+
+In the [[#general-idea-and-preparation][General Idea and Preparation]] section we provide an overview of
+what is going on and the single step both your firm and the customer
+need to execute. If you are an expert AWS user, this may be all
+you need. But we also provide [[#detailed-cli-operations][Detailed CLI Operations]] so you can start
+from scratch, create test users, grant the permissions, and verify
+everything works yourself. These detailed operations are particularly
+useful if you want to change this setup slightly to suit your situation.
+
+* General Idea and Preparation
+:PROPERTIES:
+:CUSTOM_ID: general-idea-and-preparation
+:END:
+
+Imagine you an AWS account for your firm and your customer has an AWS
+account. What you want to do is roughly the following
+
+  1. Have the Customer Account grant your Firm Account's root user
+     access to the customer's bucket.
+  2. Have your Firm Account grant an IAM account access to the
+     customer's bucket.
+     - This is the main stumbling block that confuses a lot of users
+       and often isn't documented well. If you try to have the
+       Customer Account grant access to a non-root IAM account in your
+       firm, you will generally get various errors. 
+     - Roughly speaking this step is necessary because a non-root IAM
+       account in your Firm Account doesn't have *any* permissions
+       unless you grant them from an admin user in your Firm Account.
+
+** Customer Action
+:PROPERTIES:
+:CUSTOM_ID: customer-action
+:END:
+
+
+The customer needs to create a policy to grant the firm account's root
+user bucket access and apply the policy to the bucket. This is
+illustrated below where you would replace =${FIRM_ACCT}= with the AWS
+account number for your firm and replace =${BUCKET}= with the name of
+the AWS bucket.
+
+#+NAME: setup-aws-writer-policy-overview
+#+BEGIN_SRC sh :session aws :results drawer
+cat > /tmp/writer-policy.json<<EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {
+	        "AWS": "arn:aws:iam::${FIRM_ACCT}:root"
+            },
+            "Action": [
+                "s3:GetObject",
+                "s3:ListBucket",
+		"s3:GetLifecycleConfiguration",
+                "s3:PutObject",
+                "s3:PutObjectAcl"
+            ],
+            "Resource": [
+                "arn:aws:s3:::${BUCKET}",
+                "arn:aws:s3:::${BUCKET}/*"
+            ]
+        }
+    ]
+}
+EOF
+#+END_SRC
+
+and apply the policy:
+
+#+NAME: apply-aws-writer-bucket-policy-overview
+#+BEGIN_SRC sh :session aws :results drawer 
+aws s3api put-bucket-policy \
+  --bucket ${BUCKET} --policy file:///tmp/writer-policy.json
+#+END_SRC
+
+** Firm Action
+
+After completing the required [[#customer-action][Customer Action]], your firm's root user
+will have access to the customer's bucket. Generally, however, you
+should not be using your firm's root user to do anything but delegate
+appropriate permissions to an IAM account in your firm.
+
+Below we create an inline policy to allow bucket access and grant it
+to an IAM user in your firm's account named =$FIRM_IAM_USER=:
+#+NAME: setup-aws-policy-for-iam-user
+#+BEGIN_SRC sh :session aws :results drawer
+cat > /tmp/writer-policy-iam.json<<EOF
+{
+   "Version": "2012-10-17",
+   "Statement": [
+      {
+         "Sid": "allowwriteruseriamaccess",
+         "Effect": "Allow",
+         "Action": [
+            "s3:ListBucket",
+            "s3:GetObject",
+            "s3:PutObject",
+            "s3:PutObjectAcl"
+         ],
+         "Resource": [
+            "arn:aws:s3:::${BUCKET}",
+            "arn:aws:s3:::${BUCKET}/*"
+         ]
+      }
+   ]
+}
+EOF
+#+END_SRC
+
+Now we apply the policy.
+#+NAME: apply-aws-policy-for-iam-writer-user
+#+BEGIN_SRC sh :session aws :results drawer
+aws iam put-user-policy --user-name $FIRM_IAM_USER \
+  --policy-name writer-policy \
+  --policy-document file:///tmp/writer-policy-iam.json
+#+END_SRC
+
+
+
+
+* Detailed CLI Operations
+:PROPERTIES:
+:CUSTOM_ID: detailed-cli-operations
+:END:
+
+
+The following provide documentation and commands to use in a command
+line interface (CLI). These should work on Linux, Mac, or WSL (if you
+are using Windows, I highly recommend WSL). You should basically be
+able to just cut and paste these commands into your terminal (with
+obvious minor modifications like setting environment variables to
+point to your accounts).
+
+** Setup variables and software
+
+The first step is to setup a python virtual environment and install
+the AWS CLI into it:
+
+#+NAME: aws-setup
+#+BEGIN_SRC sh :session aws
+python3 -m venv venv_aws
+. venv_aws/bin/activate
+pip install boto3 awscli
+#+END_SRC
+
+Next you will want to setup some environment variables:
+
+- =CUSTOMER_PROFILE=: This should be the name of the profile in the
+  =~/.aws/credentials= for the customer's account. In the example
+  below, this is set to =my_awesome_customer=; you should change this
+  to whatever account you are using to test or for the real customer's
+  account.
+- =FIRM_PROFILE=: This should be the name of the profile in your
+  =~/.aws/credentials= for your firm's account. In the example below,
+  this is set to =my_firm=.
+- =CUSTOMER_USER=: This is the IAM account that you or your customer
+  will use for testing.
+- =CUSTOMER_AWS_ACCT=: This is the account ID for the customer's AWS
+  account.
+- =BUCKET=: Name of the bucket you want to use.
+- =FIRM_ACCT=: This is the account ID for your firm's AWS account.
+- =FIRM_IAM_USER=: This is the name of the IAM user in your firm that
+  will be granted ability to write to the customer's bucket (by your
+  firm's root account).
+
+Once you have decided on the values above, you should execute like the
+following to store these as environment variables so you can use them
+in the remainder of this example.
+#+NAME: setup-vars
+#+BEGIN_SRC sh :session aws
+export CUSTOMER_PROFILE=my_awesome_customer
+export CUSTOMER_USER=test-customer
+export CUSTOMER_AWS_ACCT=ACCT_ID_FOR_THE_CUSTOMER
+export BUCKET=my.test.bucket
+export FIRM_ACCT=ACCT_ID_FOR_THE_BROAD
+export FIRM_PROFILE=my_firm
+export FIRM_IAM_USER=test-writer
+#+END_SRC
+
+Note: if you type something like =cat ~/.aws/credentials=, that
+command should show you something like
+#+BEGIN_EXAMPLE
+[my_awesome_customer]
+aws_access_key_id=...
+aws_secret_access_key=...
+[my_firm]
+aws_access_key_id=...
+aws_secret_access_key=...
+#+END_EXAMPLE
+where the ellipsis are replaced with the appropriate access keys for
+your customer and your firm. If not, make sure to setup your
+=~/.aws/credentials= appropriately.
+
+** Customer Granting Access to Firm
+
+Here we basically just execute the [[#customer-action][Customer Action]] mentioned earlier.
+We create a policy so that the firm's root user can read/write to the
+desired bucket:
+#+NAME: setup-aws-writer-policy
+#+BEGIN_SRC sh :session aws :results drawer
+cat > /tmp/policy-for-firm-root.json<<EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {
+	        "AWS": "arn:aws:iam::${FIRM_ACCT}:root"
+            },
+            "Action": [
+                "s3:GetObject",
+                "s3:ListBucket",
+		"s3:GetLifecycleConfiguration",
+                "s3:PutObject",
+                "s3:PutObjectAcl"
+            ],
+            "Resource": [
+                "arn:aws:s3:::${BUCKET}",
+                "arn:aws:s3:::${BUCKET}/*"
+            ]
+        }
+    ]
+}
+EOF
+#+END_SRC
+
+Now the customer applies the policy:
+#+NAME: apply-aws-writer-bucket-policy
+#+BEGIN_SRC sh :session aws :results drawer 
+aws --profile ${CUSTOMER_PROFILE} s3api put-bucket-policy \
+  --bucket $BUCKET --policy file:///tmp/policy-for-firm-root.json
+#+END_SRC
+
+** Create Customer User
+
+The steps below are not strictly necessary. They are provided so you
+or the customer can do testing. Note that these are executed by the
+customer so they use =--profile $CUSTOMER_PROFILE=. We create an IAM
+user on the customer side for testing reading and writing to the
+customer's bucket:
+#+NAME: setup-customer-user
+#+BEGIN_SRC sh :session aws :results drawer
+aws --profile $CUSTOMER_PROFILE iam create-user \
+  --user-name ${CUSTOMER_USER} | tee /tmp/customer-user.json
+#+END_SRC
+
+#+RESULTS: setup-customer-user
+:results:
+{
+    "User": {
+        "Path": "/",
+        "UserName": "test-customer",
+        "UserId": REDACTED,
+        "Arn": "arn:aws:iam::REDACTED:user/test-customer",
+        "CreateDate": "2023-09-12T03:27:24Z"
+    }
+}
+:end:
+
+Next we will create credentials for the customer user:
+
+#+NAME: create-access-key-customer-user
+#+BEGIN_SRC sh :session aws :results drawer 
+aws --profile ${CUSTOMER_PROFILE} iam create-access-key \
+  --user-name ${CUSTOMER_USER} | tee /tmp/creds_customer_user.json
+#+END_SRC
+
+#+RESULTS: create-access-key-customer-user
+:results:
+{
+    "AccessKey": {
+        "UserName": "test-customer",
+        "AccessKeyId": REDACTED,
+        "Status": "Active",
+        "SecretAccessKey": REDACTED,
+        "CreateDate": "2023-09-12T03:27:50Z"
+    }
+}
+:end:
+
+Now we can create the policy for the bucket so that the customer's IAM user can
+read/write files to the bucket (note that this *overwrites* the
+previously applied =policy-for-firm-root.json= so we will need to add
+that back after testing):
+#+NAME: setup-aws-policy-for-customer
+#+BEGIN_SRC sh :session aws :results drawer
+cat > /tmp/policy.json<<EOF
+{
+   "Version": "2012-10-17",
+   "Statement": [
+      {
+         "Sid": "statement1",
+         "Effect": "Allow",
+         "Principal": {
+            "AWS": "arn:aws:iam::${CUSTOMER_AWS_ACCT}:user/${CUSTOMER_USER}"
+         },
+         "Action": [
+            "s3:GetBucketLocation",
+            "s3:ListBucket"
+         ],
+         "Resource": [
+            "arn:aws:s3:::${BUCKET}"
+         ]
+      },
+      {
+         "Sid": "statement2",
+         "Effect": "Allow",
+         "Principal": {
+            "AWS": "arn:aws:iam::${CUSTOMER_AWS_ACCT}:user/${CUSTOMER_USER}"
+         },
+         "Action": [
+             "s3:GetObject",
+             "s3:PutObject",
+             "s3:PutObjectAcl"
+         ],
+         "Resource": [
+            "arn:aws:s3:::${BUCKET}/*"
+         ]
+      }
+   ]
+}
+EOF
+#+END_SRC
+
+Now apply policy so customer can access bucket:
+#+NAME: apply-aws-customer-bucket-policy
+#+BEGIN_SRC sh :session aws :results drawer
+aws --profile ${CUSTOMER_PROFILE} s3api put-bucket-policy \
+  --bucket $BUCKET --policy file:///tmp/policy.json
+#+END_SRC
+
+
+Verify customer can write to the bucket
+#+NAME: test-customer-write-bucket
+#+BEGIN_SRC sh :session aws :results output drawer
+echo "Example file with date `date`" > /tmp/example-file.txt
+AWS_ACCESS_KEY_ID=`jq -r .AccessKey.AccessKeyId /tmp/creds_customer_user.json` \
+  AWS_SECRET_ACCESS_KEY=`jq -r .AccessKey.SecretAccessKey /tmp/creds_customer_user.json` \
+  aws s3api put-object --bucket $BUCKET --key example-file.txt \
+  --body /tmp/example-file.txt
+AWS_ACCESS_KEY_ID=`jq -r .AccessKey.AccessKeyId /tmp/creds_customer_user.json` \
+  AWS_SECRET_ACCESS_KEY=`jq -r .AccessKey.SecretAccessKey /tmp/creds_customer_user.json` \
+  aws s3api get-object --bucket $BUCKET --key example-file.txt /tmp/out.txt
+cat /tmp/out.txt
+#+END_SRC
+
+#+RESULTS: test-customer-write-bucket
+:results:
+{
+    "ETag": "\"3a814e81f659bf56227b726b7c7fe2b2\"",
+    "ServerSideEncryption": "AES256"
+}
+{
+    "AcceptRanges": "bytes",
+    "LastModified": "Tue, 12 Sep 2023 03:36:41 GMT",
+    "ContentLength": 52,
+    "ETag": "\"3a814e81f659bf56227b726b7c7fe2b2\"",
+    "ContentType": "binary/octet-stream",
+    "ServerSideEncryption": "AES256",
+    "Metadata": {}
+}
+Example file with date Mon Sep 11 23:36:40 EDT 2023
+:end:
+
+Now that our testing is done, add back the policy for the firm root:
+#+NAME: apply-aws-writer-bucket-policy
+#+BEGIN_SRC sh :session aws :results drawer 
+aws --profile ${CUSTOMER_PROFILE} s3api put-bucket-policy \
+  --bucket $BUCKET --policy file:///tmp/policy-for-firm-root.json
+#+END_SRC
+
+
+** Create Firm User and Policy
+
+In this section we create an IAM user account in the firm's AWS
+account that can access the customer's bucket. Note that most of these
+commands use =--profile ${FIRM_PROFILE}= since they are executing in
+the firm's AWS account.
+
+Generally you would only need to create this firm user once. For this
+setup, you would need to apply the policy to the firm user for each
+customer bucket or create a more sophisticated policy with wild cards
+that would apply to all customer buckets but that is beyond the scope
+of this article.
+
+Now we make an IAM account for your firm who can write to the desired
+bucket:
+#+NAME: aws-make-writer-user
+#+BEGIN_SRC sh :session aws :results drawer
+aws --profile ${FIRM_PROFILE} iam create-user \
+  --user-name $FIRM_IAM_USER | tee /tmp/writer-user.json
+#+END_SRC
+
+#+RESULTS: aws-make-writer-user
+:results:
+{
+    "User": {
+        "Path": "/",
+        "UserName": "test-writer",
+        "UserId": REDACTED,
+        "Arn": "arn:aws:iam::REDACTED:user/test-writer",
+        "CreateDate": "2023-09-12T03:39:13Z"
+    }
+}
+:end:
+
+Now we create access keys for the new user:
+#+NAME: create-access-key-for-writer
+#+BEGIN_SRC sh :session aws :results drawer :exports code
+aws --profile ${FIRM_PROFILE} iam create-access-key \
+  --user-name $FIRM_IAM_USER | tee /tmp/writer-creds.json
+#+END_SRC
+
+#+RESULTS: create-access-key-for-writer
+:results:
+{
+    "AccessKey": {
+        "UserName": "test-writer",
+        "AccessKeyId": REDACTED,
+        "Status": "Active",
+        "SecretAccessKey": REDACTED,
+        "CreateDate": "2023-09-12T03:39:43Z"
+    }
+}
+:end:
+
+
+Now we setup a policy for the firm's non-root user so it can access
+the bucket which root has been granted access to buy the customer.
+#+NAME: setup-aws-policy-for-iam-user
+#+BEGIN_SRC sh :session aws :results drawer
+cat > /tmp/writer-policy-iam.json<<EOF
+{
+   "Version": "2012-10-17",
+   "Statement": [
+      {
+         "Sid": "allowwriteruseriamaccess",
+         "Effect": "Allow",
+         "Action": [
+            "s3:ListBucket",
+            "s3:GetObject",
+            "s3:PutObject",
+            "s3:PutObjectAcl"
+         ],
+         "Resource": [
+            "arn:aws:s3:::${BUCKET}",
+            "arn:aws:s3:::${BUCKET}/*"
+         ]
+      }
+   ]
+}
+EOF
+#+END_SRC
+
+
+Now we apply the policy where the firm's admin is granting access to
+the non-root =$FIRM_IAM_USER=.
+#+NAME: apply-aws-policy-for-iam-writer-user
+#+BEGIN_SRC sh :session aws :results drawer
+aws --profile ${FIRM_PROFILE} \
+  iam put-user-policy --user-name $FIRM_IAM_USER --policy-name writer-policy \
+  --policy-document file:///tmp/writer-policy-iam.json
+#+END_SRC
+
+
+Now we test writing and reading.
+#+NAME: test-write-bucket-from-writer
+#+BEGIN_SRC sh :session aws :results drawer
+rm -f /tmp/out.txt
+echo "Example file with date `date`" > /tmp/example-file.txt
+AWS_ACCESS_KEY_ID=`jq -r .AccessKey.AccessKeyId /tmp/writer-creds.json` \
+  AWS_SECRET_ACCESS_KEY=`jq -r .AccessKey.SecretAccessKey /tmp/writer-creds.json` \
+  aws s3api put-object --bucket $BUCKET --key example-file.txt \
+  --body /tmp/example-file.txt
+AWS_ACCESS_KEY_ID=`jq -r .AccessKey.AccessKeyId /tmp/writer-creds.json` \
+  AWS_SECRET_ACCESS_KEY=`jq -r .AccessKey.SecretAccessKey /tmp/writer-creds.json` \
+  aws s3api get-object --bucket $BUCKET --key example-file.txt /tmp/out.txt
+cat /tmp/out.txt
+#+END_SRC
+
+#+RESULTS: test-write-bucket-from-writer
+:results:
+{
+    "ETag": "\"72c3d88e933305e734e625fd5f3a465d\"",
+    "ServerSideEncryption": "AES256"
+}
+{
+    "AcceptRanges": "bytes",
+    "LastModified": "Tue, 12 Sep 2023 03:53:44 GMT",
+    "ContentLength": 52,
+    "ETag": "\"72c3d88e933305e734e625fd5f3a465d\"",
+    "ContentType": "binary/octet-stream",
+    "ServerSideEncryption": "AES256",
+    "Metadata": {}
+}
+Example file with date Mon Sep 11 23:53:43 EDT 2023
+:end:
+
+** Cleanup
+
+Now clean-up the user we created for testing on the customer side.
+#+NAME: cleanup-customer-side
+#+BEGIN_SRC sh :session aws :results drawer
+aws --profile ${CUSTOMER_PROFILE} iam delete-access-key \
+   --user-name ${CUSTOMER_USER} --access-key-id \
+     `jq -r .AccessKey.AccessKeyId /tmp/creds_customer_user.json`
+aws --profile ${CUSTOMER_PROFILE} iam delete-user \
+  --user-name $CUSTOMER_USER
+#+END_SRC
+
+
+Now clean-up the user we created for the firm.
+#+NAME: cleanup-firm-side
+#+BEGIN_SRC sh :session aws :results drawer
+aws --profile ${FIRM_PROFILE} iam delete-user-policy \
+  --user-name $FIRM_IAM_USER --policy-name writer-policy 
+aws --profile ${FIRM_PROFILE} iam delete-access-key \
+  --access-key-id `jq -r .AccessKey.AccessKeyId /tmp/writer-creds.json` \
+  --user-name $FIRM_IAM_USER
+aws --profile ${FIRM_PROFILE} iam delete-user \
+  --user-name $FIRM_IAM_USER
+#+END_SRC
+
+You may also want to delete the bucket if desired.
