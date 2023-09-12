@@ -15,6 +15,11 @@ from scratch, create test users, grant the permissions, and verify
 everything works yourself. These detailed operations are particularly
 useful if you want to change this setup slightly to suit your situation.
 
+The source code for this document is available in the
+[[https://github.com/aocks/aws-examples/tree/main/cross-account-s3][aocks/aws-examples]] repo on GitHub and discussed (along with other
+information) in [[https://www.aocks.com/posts/aws-s3-cross-account-bucket-perms/][this article]] on the [[https://www.aocks.com/posts/][AOCKS blog]].
+
+
 * General Idea and Preparation
 :PROPERTIES:
 :CUSTOM_ID: general-idea-and-preparation
